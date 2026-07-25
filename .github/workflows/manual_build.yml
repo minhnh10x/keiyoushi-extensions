@@ -1,0 +1,78 @@
+name: Manual Build Extensions
+
+on:
+  workflow_dispatch:
+    inputs:
+      extension_paths:
+        description: "Danh sách extension dạng lang/source, cách nhau bằng dấu phẩy. Vd: vi/panomic, en/mangadex"
+        required: true
+        type: string
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.parse.outputs.matrix }}
+    steps:
+      - name: Parse extension list into JSON matrix
+        id: parse
+        run: |
+          RAW="${{ inputs.extension_paths }}"
+          ITEMS=$(echo "$RAW" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')
+
+          JSON="[]"
+          while IFS= read -r item; do
+            lang=$(echo "$item" | cut -d'/' -f1)
+            src=$(echo "$item" | cut -d'/' -f2)
+            JSON=$(echo "$JSON" | jq -c --arg lang "$lang" --arg src "$src" --arg path "$item" \
+              '. += [{"lang": $lang, "src": $src, "path": $path}]')
+          done <<< "$ITEMS"
+
+          echo "matrix=$JSON" >> "$GITHUB_OUTPUT"
+          echo "Extensions to build:"
+          echo "$JSON" | jq .
+
+  build:
+    needs: prepare
+    name: build (${{ matrix.extension.src }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        extension: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "zulu"
+          java-version: 17
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew
+
+      - name: Build extension APK (${{ matrix.extension.path }})
+        run: ./gradlew src:${{ matrix.extension.lang }}:${{ matrix.extension.src }}:assembleDebug --stacktrace
+
+      - name: Locate APK
+        id: locate
+        run: |
+          APK_PATH=$(find "src/${{ matrix.extension.lang }}/${{ matrix.extension.src }}/build/outputs/apk" -name "*.apk" | head -n 1)
+          if [ -z "$APK_PATH" ]; then
+            echo "Không tìm thấy APK cho ${{ matrix.extension.path }}"
+            exit 1
+          fi
+          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
+          echo "Found APK: $APK_PATH"
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.extension.src }}-debug
+          path: ${{ steps.locate.outputs.apk_path }}
+          if-no-files-found: error
